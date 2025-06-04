@@ -4,7 +4,6 @@ characteristics based on medication data using LLMs.
 
 Supported Assessments:
 - Binary: Type II diabetes, AUDIT-C, insurance status, alcohol abuse
-- Ordinal (5 levels): Fatigue and anxiety
 
 Usage:
     python estimate_prob_given_drug.py --model_name MODEL_NAME \
@@ -12,11 +11,10 @@ Usage:
 
 Required Arguments:
     --model_name     Huggingface model name (e.g., meta-llama/Llama-3.1-70B-Instruct)
-    --assessment     Assessment type (diabetes|audit_c|fatigue|anxiety|insurance|alcohol_abuse)
+    --assessment     Assessment type (diabetes|audit_c|insurance|alcohol_abuse)
 
 Optional Arguments:
     --cot           Enable chain-of-thought reasoning
-    --enforce       Enforce LLMs to provide estimation even uncertain
     --num_gpus      Number of GPUs for tensor parallelism (default: 1)
     --temperature   Sampling temperature (default: 0.6)
     --input_file    Input parquet file with drug names
@@ -31,7 +29,6 @@ Output:
     - Drug names
     - Estimated probabilities
     - Full LLM responses
-    - Probabilities for each severity level (only for ordinal assessments)
 """
 
 import argparse
@@ -41,7 +38,6 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -60,70 +56,34 @@ logging.basicConfig(
 MAX_MODEL_LENGTH = 4096
 MODEL_NAME_GLOBAL = None
 
-class QueryType(Enum):
-    BINARY = "binary"
-    ORDINAL = "ordinal"
-
 @dataclass
 class AssessmentConfig:
     name: str
-    query_type: QueryType
     system_prompt: str
     question: str
-    levels: Optional[List[str]] = None
 
-    def create_prompt(self, drug: str, level: Optional[str] = None, cot: bool = False) -> str:
+    def create_prompt(self, drug: str, cot: bool = False) -> str:
         """
         Create a simple, direct prompt for the assessment.
         Args:
             drug: Name of the drug
-            level: Level for ordinal assessments (optional)
             cot: Whether to include chain-of-thought reasoning instruction
         """
-        if self.query_type == QueryType.BINARY:
-            questionnaire_info = f"\n\n{self.question}\n\n" if self.question else "\n\n"
-            base_prompt = (
-                f"Given that a patient took {drug}, estimate the probability that they have {self.name}."
-                f"{questionnaire_info}"
-                "Provide the probability enclosed within [ESTIMATION] and [/ESTIMATION] tags."
-            )
-        else:
-            if self.question:
-                base_prompt = (
-                    f"For a patient taking {drug}, what is the probability they would report '{level}'?\n\n"
-                    "Provide the probability enclosed within [ESTIMATION] and [/ESTIMATION] tags."
-                )
-            else:
-                base_prompt = (
-                    f"For a patient taking {drug}, estimate the probability of {level}. "
-                    "Provide the probability enclosed within [ESTIMATION] and [/ESTIMATION] tags."
-                )
+        questionnaire_info = f"\n\n{self.question}\n\n" if self.question else "\n\n"
+        base_prompt = (
+            f"Given that a patient took {drug}, estimate the probability that they have {self.name}."
+            f"{questionnaire_info}"
+            "Provide the probability enclosed within [ESTIMATION] and [/ESTIMATION] tags."
+        )
 
         if cot:
             base_prompt += "\nYou may think aloud and reason step-by-step before reaching the final answer."
 
         return base_prompt
 
-    def get_system_prompt(self, enforce: bool = False) -> str:
-        """
-        Get system prompt with optional enforcement language.
-        Args:
-            enforce: Whether to add enforcement language
-        """
-        base_system_prompt = self.system_prompt
-        if enforce:
-            enforcement_addition = (
-                " You must always provide a numerical probability estimate between 0 and 1, "
-                "even if uncertain. If you are unsure, provide your best estimate based on "
-                "available knowledge. You cannot refuse to provide an estimate."
-            )
-            base_system_prompt += enforcement_addition
-        return base_system_prompt
-
 ASSESSMENT_CONFIGS = {
     "diabetes": AssessmentConfig(
         name="Type II diabetes",
-        query_type=QueryType.BINARY,
         question="",
         system_prompt=(
             "You are a medical language model designed to estimate the probability that a patient has Type II diabetes based on the specific medicine they use. Provide the probability enclosed within [ESTIMATION] and [/ESTIMATION] tags."
@@ -131,7 +91,6 @@ ASSESSMENT_CONFIGS = {
     ),
     "audit_c": AssessmentConfig(
         name="high-risk AUDIT-C score (4+ for men, 3+ for women)",
-        query_type=QueryType.BINARY,
         question="""The AUDIT-C score is based on three questions:
 
         1. How often do you have a drink containing alcohol?
@@ -163,33 +122,13 @@ ASSESSMENT_CONFIGS = {
     ),
     "audit_c_simplified": AssessmentConfig(
         name="high-risk AUDIT-C score (4+ for men, 3+ for women)",
-        query_type=QueryType.BINARY,
         question="",
         system_prompt=(
             "You are a medical language model designed to estimate the probability that a patient has a high-risk AUDIT-C score based on the specific medicine they use. Provide the probability enclosed within [ESTIMATION] and [/ESTIMATION] tags."
         ),
     ),
-    "fatigue": AssessmentConfig(
-        name="fatigue level",
-        query_type=QueryType.ORDINAL,
-        question="In the past 7 days, how would you rate your fatigue?",
-        levels=["None", "Mild", "Moderate", "Severe", "Very Severe"],
-        system_prompt=(
-             "You are a medical language model designed to estimate the probability of different fatigue levels a patient has based on the specific medicine they use. Provide the probability enclosed within [ESTIMATION] and [/ESTIMATION] tags."
-        ),
-    ),
-    "anxiety": AssessmentConfig(
-        name="emotional problems",
-        query_type=QueryType.ORDINAL,
-        question="In the past 7 days, how often have you been bothered by emotional problems such as feeling anxious, depressed or irritable?",
-        levels=["Never", "Rarely", "Sometimes", "Often", "Always"],
-        system_prompt=(
-            "You are a medical language model designed to estimate the probability of different frequencies of emotional problems based on the specific medicine they use. Provide the probability enclosed within [ESTIMATION] and [/ESTIMATION] tags."
-        ),
-    ),
     "insurance": AssessmentConfig(
         name="employer-based insurance",
-        query_type=QueryType.BINARY,
         question="",
         system_prompt=(
             "You are a medical language model designed to estimate the probability that a patient has employer-based insurance based on the specific medicine they use. Provide the probability enclosed within [ESTIMATION] and [/ESTIMATION] tags."
@@ -197,7 +136,6 @@ ASSESSMENT_CONFIGS = {
     ),
     "alcohol_abuse": AssessmentConfig(
         name="alcohol abuse",
-        query_type=QueryType.BINARY,
         question="",
         system_prompt=(
             "You are a medical language model designed to estimate the probability that a patient has alcohol abuse based on the specific medicine they use. "
@@ -227,7 +165,6 @@ ASSESSMENT_CONFIGS = {
     ),
     "breast_cancer": AssessmentConfig(
         name="breast cancer",
-        query_type=QueryType.BINARY,
         question="",
         system_prompt=(
             "You are a medical language model designed to estimate the probability that a woman has breast cancer based on the provided diagnostic codes and medication data. "
@@ -271,7 +208,6 @@ ASSESSMENT_CONFIGS = {
     ),
     "breast_cancer_simplified": AssessmentConfig(
         name="breast cancer",
-        query_type=QueryType.BINARY,
         question="",
         system_prompt=(
             "You are a medical language model designed to estimate the probability that a woman has breast cancer based solely on medication data. "
@@ -280,7 +216,6 @@ ASSESSMENT_CONFIGS = {
     ),
     "alcoholic_hepatitis_simplified": AssessmentConfig(
         name="alcoholic hepatitis",
-        query_type=QueryType.BINARY,
         question="",
         system_prompt=(
             "You are a medical language model designed to estimate the probability that a patient has alcoholic hepatitis based solely on medication data. "
@@ -289,7 +224,6 @@ ASSESSMENT_CONFIGS = {
     ),
     "alcohol_abuse_simplified": AssessmentConfig(
         name="alcohol abuse",
-        query_type=QueryType.BINARY,
         question="",
         system_prompt=(
             "You are a medical language model designed to estimate the probability that a patient has alcohol abuse based solely on medication data. "
@@ -298,7 +232,6 @@ ASSESSMENT_CONFIGS = {
     ),
     "hypertension_simplified": AssessmentConfig(
         name="hypertension",
-        query_type=QueryType.BINARY,
         question="",
         system_prompt=(
             "You are a medical language model designed to estimate the probability that a patient has hypertension based solely on medication data. "
@@ -307,21 +240,18 @@ ASSESSMENT_CONFIGS = {
     )
 }
 
-def create_conversation(
-        drug: str, assessment_config: AssessmentConfig, level: Optional[str], cot: bool,
-        enforce: bool = False
-) -> List[Dict]:
+def create_conversation(drug: str, assessment_config: AssessmentConfig, cot: bool) -> List[Dict]:
     """
     Create a conversation template.
     For models that do not support a separate system role (e.g., DeepSeek-R1 and Gemma-2),
     prepend the system instruction to the user prompt.
     """
-    system_prompt = assessment_config.get_system_prompt(enforce)
+    system_prompt = assessment_config.system_prompt
     # get system prompt; if the model is deepseek-r1, add extra directive for chain-of-thought
     # refer to https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B
     if "deepseek-r1" in MODEL_NAME_GLOBAL:
         system_prompt += "\nPlease ensure that your answer begins with \"<think>\n\"."
-    user_prompt = assessment_config.create_prompt(drug, level, cot)
+    user_prompt = assessment_config.create_prompt(drug, cot)
     if ("deepseek-r1" in MODEL_NAME_GLOBAL) or ("gemma" in MODEL_NAME_GLOBAL):
         combined_prompt = f"{system_prompt}\n{user_prompt}"
         return [{"role": "user", "content": combined_prompt}]
@@ -358,33 +288,32 @@ def extract_probability(response_text: str) -> Optional[float]:
     return None
 
 def generate_batch_conversations(
-    drug_level_pairs: List[Tuple[str, Optional[str]]],
-    assessment_config: AssessmentConfig,
-    cot: bool,
-    enforce: bool
+        drugs: List[str],
+        assessment_config: AssessmentConfig,
+        cot: bool
 ) -> List[List[Dict]]:
     """Generate batch conversations for vLLM processing."""
     conversations = []
-    for drug, level in drug_level_pairs:
-        conversation = create_conversation(drug, assessment_config, level, cot, enforce)
+    for drug in drugs:
+        conversation = create_conversation(drug, assessment_config, cot)
         conversations.append(conversation)
     return conversations
 
 def process_batch_results(
-    outputs: List,
-    drug_level_pairs: List[Tuple[str, Optional[str]]],
-    global_seed: int
-) -> Tuple[List[Dict], List[Tuple[str, Optional[str]]]]:
+        outputs: List,
+        drugs: List[str],
+        global_seed: int
+) -> Tuple[List[Dict], List[str]]:
     """
     Process batch results from vLLM.
     Returns:
         - List of successful results
-        - List of failed drug_level_pairs that need retry
+        - List of failed drugs that need retry
     """
     results = []
-    failed_pairs = []
+    failed_drugs = []
 
-    for i, ((drug, level), output) in enumerate(zip(drug_level_pairs, outputs)):
+    for i, (drug, output) in enumerate(zip(drugs, outputs)):
         try:
             if output and output.outputs and len(output.outputs) > 0:
                 response_text = output.outputs[0].text
@@ -396,149 +325,19 @@ def process_batch_results(
                     "llm_response": response_text,
                     "seed": global_seed,
                 }
-                if level is not None:
-                    result["level"] = level
                 results.append(result)
 
                 # log if probability extraction failed
                 if probability is None:
-                    logging.warning(f"Failed to extract probability for {drug}{f' (level: {level})' if level else ''}")
+                    logging.warning(f"Failed to extract probability for {drug}")
             else:
-                logging.warning(f"Empty output for {drug}{f' (level: {level})' if level else ''}, marking for retry")
-                failed_pairs.append((drug, level))
+                logging.warning(f"Empty output for {drug}, marking for retry")
+                failed_drugs.append(drug)
         except Exception as e:
-            logging.error(f"Error processing result for {drug}{f' (level: {level})' if level else ''}: {str(e)}")
-            failed_pairs.append((drug, level))
+            logging.error(f"Error processing result for {drug}: {str(e)}")
+            failed_drugs.append(drug)
 
-    return results, failed_pairs
-
-def estimate_probabilities_batch(
-        drugs: List[str],
-        assessment_name: str,
-        cot: bool,
-        enforce: bool,
-        model_name: str,
-        llm: LLM,
-        sampling_params: SamplingParams,
-        global_seed: int,
-        checkpoint_interval: int = 50,
-        max_concurrent_requests: Optional[int] = None,
-        max_retries: int = 3,
-) -> pd.DataFrame:
-    """Main estimation function using vLLM batch processing with individual retry logic."""
-    if not drugs:
-        return pd.DataFrame()
-
-    assessment_config = ASSESSMENT_CONFIGS.get(assessment_name)
-    if not assessment_config:
-        raise ValueError(f"Invalid assessment name: {assessment_name}")
-
-    os.makedirs("results", exist_ok=True)
-    model_shortname = model_name.split('/')[-1].lower()
-    status_suffix = '_'.join(filter(None, [
-        'cot' if cot else '',
-        'enforce' if enforce else '',
-        f'seed{global_seed}'
-    ]))
-    checkpoint_file = f"results/{assessment_name}_{model_shortname}{f'_{status_suffix}' if status_suffix else ''}.parquet"
-
-    # load checkpoint with error handling
-    results_df = pd.DataFrame()
-    if os.path.exists(checkpoint_file):
-        try:
-            results_df = pd.read_parquet(checkpoint_file)
-            if assessment_config.query_type == QueryType.BINARY:
-                processed_drugs = set(results_df["drug"].unique())
-            else:
-                # for ordinal, check if all levels are processed for each drug
-                levels = assessment_config.levels
-                processed_pairs = set(zip(results_df["drug"], results_df["level"]))
-                processed_drugs = set()
-                for drug in drugs:
-                    if all((drug, level) in processed_pairs for level in levels):
-                        processed_drugs.add(drug)
-
-            remaining_drugs = [d for d in drugs if d not in processed_drugs]
-            logging.info(f"Loaded checkpoint with {len(results_df)} records. {len(remaining_drugs)} drugs remaining.")
-        except Exception as e:
-            logging.error(f"Error loading checkpoint: {str(e)}")
-            remaining_drugs = drugs
-    else:
-        remaining_drugs = drugs
-
-    if not remaining_drugs:
-        logging.info("All drugs already processed.")
-        return results_df
-
-    # prepare drug-level pairs for processing
-    levels = [None] if assessment_config.query_type == QueryType.BINARY else assessment_config.levels
-    drug_level_pairs = []
-    for drug in remaining_drugs:
-        for level in levels:
-            drug_level_pairs.append((drug, level))
-
-    logging.info(f"Processing {len(drug_level_pairs)} drug-level combinations...")
-
-    all_results = []
-    failed_pairs = []  # track failed pairs for retry
-
-    # use max_concurrent_requests if specified, otherwise let vLLM decide
-    batch_size = max_concurrent_requests if max_concurrent_requests else len(drug_level_pairs)
-
-    # process in batches for memory management and checkpointing
-    for i in tqdm(range(0, len(drug_level_pairs), batch_size), desc="Processing batches"):
-        batch_pairs = drug_level_pairs[i:i + batch_size]
-
-        try:
-            # generate conversations for the batch
-            conversations = generate_batch_conversations(
-                batch_pairs, assessment_config, cot, enforce
-            )
-
-            # process batch with vLLM
-            outputs = llm.chat(messages=conversations, sampling_params=sampling_params)
-
-            # process results and identify failures
-            batch_results, batch_failed = process_batch_results(outputs, batch_pairs, global_seed)
-            all_results.extend(batch_results)
-            failed_pairs.extend(batch_failed)
-
-            logging.info(f"Batch {i//batch_size + 1}: {len(batch_results)} successful, {len(batch_failed)} failed")
-
-        except Exception as e:
-            logging.error(f"Error processing batch {i//batch_size + 1}: {str(e)}")
-            # if entire batch fails, mark all pairs for retry
-            failed_pairs.extend(batch_pairs)
-            continue
-
-        # save checkpoint periodically
-        if (i // batch_size + 1) % checkpoint_interval == 0:
-            try:
-                temp_df = pd.concat([results_df, pd.DataFrame(all_results)], ignore_index=True)
-                temp_df.to_parquet(checkpoint_file)
-                logging.info(f"Checkpoint saved with {len(temp_df)} total records")
-            except Exception as e:
-                logging.error(f"Error saving checkpoint: {str(e)}")
-
-    # retry failed pairs individually
-    if failed_pairs:
-        logging.info(f"Retrying {len(failed_pairs)} failed drug-level combinations individually...")
-        retry_results = retry_failed_pairs(
-            failed_pairs, assessment_config, cot, enforce, llm, sampling_params,
-            global_seed, max_retries
-        )
-        all_results.extend(retry_results)
-
-    # save final results
-    try:
-        final_df = pd.concat([results_df, pd.DataFrame(all_results)], ignore_index=True)
-        final_df.to_parquet(checkpoint_file)
-        logging.info(f"Final results saved with {len(final_df)} total records")
-    except Exception as e:
-        logging.error(f"Error saving final results: {str(e)}")
-        final_df = pd.concat([results_df, pd.DataFrame(all_results)], ignore_index=True)
-
-    return final_df
+    return results, failed_drugs
 
 def save_checkpoint(results_df: pd.DataFrame, new_results: List[Dict], checkpoint_file: str) -> pd.DataFrame:
     """Save checkpoint and return updated dataframe."""
@@ -553,28 +352,147 @@ def save_checkpoint(results_df: pd.DataFrame, new_results: List[Dict], checkpoin
         logging.error(f"Error saving checkpoint: {str(e)}")
         return results_df
 
-def get_processed_pairs(results_df: pd.DataFrame, assessment_config: AssessmentConfig) -> set:
-    """Get set of already processed drug-level pairs."""
+def get_processed_drugs(results_df: pd.DataFrame) -> set:
+    """Get set of already processed drugs."""
     if results_df.empty:
         return set()
+    return set(results_df["drug"].unique())
 
-    if assessment_config.query_type == QueryType.BINARY:
-        # for binary, just need drug names
-        return set((drug, None) for drug in results_df["drug"].unique())
-    else:
-        # for ordinal, need drug-level pairs
-        return set(zip(results_df["drug"], results_df["level"]))
+def estimate_probabilities_batch(
+        drugs: List[str],
+        assessment_name: str,
+        cot: bool,
+        model_name: str,
+        llm: LLM,
+        sampling_params: SamplingParams,
+        global_seed: int,
+        checkpoint_interval: int = 50,
+        max_concurrent_requests: Optional[int] = None,
+        max_retries: int = 3,
+) -> pd.DataFrame:
+    """Main estimation function using vLLM batch processing with robust checkpointing."""
+    if not drugs:
+        return pd.DataFrame()
 
-def retry_failed_pairs_batch(
+    assessment_config = ASSESSMENT_CONFIGS.get(assessment_name)
+    if not assessment_config:
+        raise ValueError(f"Invalid assessment name: {assessment_name}")
+
+    os.makedirs("results", exist_ok=True)
+    model_shortname = model_name.split('/')[-1].lower()
+    status_suffix = '_'.join(filter(None, [
+        'cot' if cot else '',
+        f'seed{global_seed}'
+    ]))
+    checkpoint_file = f"results/{assessment_name}_{model_shortname}{f'_{status_suffix}' if status_suffix else ''}.parquet"
+
+    # load checkpoint with error handling
+    results_df = pd.DataFrame()
+    if os.path.exists(checkpoint_file):
+        try:
+            results_df = pd.read_parquet(checkpoint_file)
+            logging.info(f"Loaded checkpoint with {len(results_df)} records.")
+        except Exception as e:
+            logging.error(f"Error loading checkpoint: {str(e)}")
+            results_df = pd.DataFrame()
+
+    # get already processed drugs
+    processed_drugs = get_processed_drugs(results_df)
+
+    # get remaining drugs to process
+    remaining_drugs = [drug for drug in drugs if drug not in processed_drugs]
+
+    if not remaining_drugs:
+        logging.info("All drugs already processed.")
+        return results_df
+
+    logging.info(f"Processing {len(remaining_drugs)} remaining drugs...")
+
+    # use max_concurrent_requests if specified, otherwise let vLLM decide
+    batch_size = max_concurrent_requests if max_concurrent_requests else min(len(remaining_drugs), 1000)
+
+    all_new_results = []
+    global_failed_drugs = []
+
+    # process in batches
+    for i in tqdm(range(0, len(remaining_drugs), batch_size), desc="Processing batches"):
+        batch_drugs = remaining_drugs[i:i + batch_size]
+
+        try:
+            # generate conversations for the batch
+            conversations = generate_batch_conversations(
+                batch_drugs, assessment_config, cot
+            )
+
+            # process batch with vLLM
+            outputs = llm.chat(messages=conversations, sampling_params=sampling_params)
+
+            # process results and identify failures
+            batch_results, batch_failed = process_batch_results(outputs, batch_drugs, global_seed)
+            all_new_results.extend(batch_results)
+            global_failed_drugs.extend(batch_failed)
+
+            logging.info(f"Batch {i//batch_size + 1}: {len(batch_results)} successful, {len(batch_failed)} failed")
+
+        except Exception as e:
+            logging.error(f"Error processing batch {i//batch_size + 1}: {str(e)}")
+            # if entire batch fails, mark all drugs for retry
+            global_failed_drugs.extend(batch_drugs)
+            continue
+
+        # save checkpoint after each batch (including partial results)
+        if (i // batch_size + 1) % checkpoint_interval == 0 or i + batch_size >= len(remaining_drugs):
+            results_df = save_checkpoint(results_df, all_new_results, checkpoint_file)
+            logging.info(f"Checkpoint saved with {len(results_df)} total records")
+            all_new_results = []  # clear the buffer since we've saved
+
+    # handle any remaining unsaved results
+    if all_new_results:
+        results_df = save_checkpoint(results_df, all_new_results, checkpoint_file)
+        all_new_results = []
+
+    # retry failed drugs individually with checkpointing
+    if global_failed_drugs:
+        logging.info(f"Retrying {len(global_failed_drugs)} failed drugs individually...")
+
+        # process retries in smaller batches to enable frequent checkpointing
+        retry_batch_size = 50
+        for i in tqdm(range(0, len(global_failed_drugs), retry_batch_size), desc="Retrying failed drugs"):
+            retry_batch = global_failed_drugs[i:i + retry_batch_size]
+
+            retry_results = retry_failed_drugs_batch(
+                retry_batch, assessment_config, cot, llm, sampling_params,
+                global_seed, max_retries
+            )
+
+            # save retry results immediately
+            if retry_results:
+                results_df = save_checkpoint(results_df, retry_results, checkpoint_file)
+                logging.info(f"Saved {len(retry_results)} retry results. Total records: {len(results_df)}")
+
+    # final save
+    final_df = save_checkpoint(results_df, [], checkpoint_file)
+    logging.info(f"Final results saved with {len(final_df)} total records")
+
+    return final_df
+
+def retry_failed_drugs_batch(
+        failed_drugs: List[str],
+        assessment_config: AssessmentConfig,
+        cot: bool,
+        llm: LLM,
+        sampling_params: SamplingParams,
+        global_seed: int,
+        max_retries: int = 3
 ) -> List[Dict]:
-    """Retry failed pairs individually with exponential backoff."""
+    """Retry a batch of failed drugs individually with detailed logging."""
     results = []
 
-    for drug, level in tqdm(failed_pairs, desc="Retrying failed pairs"):
+    for drug in failed_drugs:
         success = False
         for attempt in range(max_retries):
             try:
-                conversation = create_conversation(drug, assessment_config, level, cot, enforce)
+                conversation = create_conversation(drug, assessment_config, cot)
 
                 # use different seed for each retry attempt
                 retry_params = SamplingParams(
@@ -596,17 +514,15 @@ def retry_failed_pairs_batch(
                         "llm_response": response_text,
                         "seed": global_seed + attempt + 1000,
                     }
-                    if level is not None:
-                        result["level"] = level
 
                     results.append(result)
                     success = True
                     break
                 else:
-                    logging.warning(f"Retry {attempt + 1}/{max_retries} failed for {drug}{f' (level: {level})' if level else ''}: Empty output")
+                    logging.warning(f"Retry {attempt + 1}/{max_retries} failed for {drug}: Empty output")
 
             except Exception as e:
-                logging.warning(f"Retry {attempt + 1}/{max_retries} failed for {drug}{f' (level: {level})' if level else ''}: {str(e)}")
+                logging.warning(f"Retry {attempt + 1}/{max_retries} failed for {drug}: {str(e)}")
                 continue
 
         if not success:
@@ -617,10 +533,8 @@ def retry_failed_pairs_batch(
                 "llm_response": f"FAILED_AFTER_{max_retries}_RETRIES",
                 "seed": global_seed,
             }
-            if level is not None:
-                result["level"] = level
             results.append(result)
-            logging.error(f"Permanently failed after {max_retries} retries: {drug}{f' (level: {level})' if level else ''}")
+            logging.error(f"Permanently failed after {max_retries} retries: {drug}")
 
     return results
 
@@ -636,8 +550,6 @@ def main():
                         help="Type of assessment to perform")
     parser.add_argument("--cot", action="store_true",
                         help="Enable chain-of-thought reasoning")
-    parser.add_argument("--enforce", action="store_true",
-                        help="Enforce LLMs to provide estimation even when uncertain")
     parser.add_argument("--num_gpus", type=int, default=1,
                         help="Number of GPUs to use for tensor parallelism")
     parser.add_argument("--temperature", type=float, default=0.6,
@@ -657,7 +569,7 @@ def main():
                         help="How often to save checkpoints (default: 50 batches)")
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.9,
                         help="GPU memory utilization ratio (default: 0.9)")
-    parser.add_argument("--max_retries", type=int, default=10,
+    parser.add_argument("--max_retries", type=int, default=3,
                         help="Maximum number of retries for failed items (default: 3)")
 
     args = parser.parse_args()
@@ -670,8 +582,6 @@ def main():
     logging.info(f"Model: {args.model_name}")
     logging.info(f"Assessment: {args.assessment}")
     logging.info(f"Chain of thought: {args.cot}")
-    logging.info(f"Enforce: {args.enforce}")
-    logging.info(f"Quantization: {args.int4}")
     logging.info(f"Number of GPUs: {args.num_gpus}")
     logging.info(f"GPU memory utilization: {args.gpu_memory_utilization}")
     logging.info(f"Max concurrent requests: {args.max_concurrent_requests or 'auto'}")
@@ -727,7 +637,6 @@ def main():
         drugs=drugs,
         assessment_name=args.assessment,
         cot=args.cot,
-        enforce=args.enforce,
         model_name=args.model_name,
         llm=llm,
         sampling_params=sampling_params,
@@ -749,8 +658,6 @@ def main():
         debug_subset = results_df.head(10)
         for idx, row in debug_subset.iterrows():
             logging.info(f"Drug: {row['drug']}")
-            if 'level' in row:
-                logging.info(f"Level: {row['level']}")
             logging.info(f"Response: {row['llm_response'][:200]}...")
             logging.info(f"Probability: {row['probability']}")
             logging.info(f"{'-'*40}")
