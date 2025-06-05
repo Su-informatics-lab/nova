@@ -14,7 +14,7 @@ Multi-Seed Retry Strategy:
 - Saves progress after each round for robust checkpointing
 
 Usage:
-    python estimate_prob_given_drug.py --model_name MODEL_NAME \
+    python estimate_drug_disease_prob.py --model_name MODEL_NAME \
     --assessment ASSESSMENT_TYPE [options]
 
 Required Arguments:
@@ -23,15 +23,15 @@ Required Arguments:
 
 Optional Arguments:
     --cot           Enable chain-of-thought reasoning
-    --num_gpus      Number of GPUs for tensor parallelism (default: 6)
+    --num_gpus      Number of GPUs for tensor parallelism (default: 2)
     --temperature   Sampling temperature (default: 0.6)
     --seed          Base random seed for reproducibility (default: 42)
-    --debug         Enable debug mode (process only first 5 drugs and print responses)
+    --debug         Enable debug mode (process only first 200 drugs and print responses)
     --int4          Enable BitsAndBytes 4-bit quantization
     --max_retries   Maximum number of retry rounds with different seeds (default: 20)
 
 Input:
-    Automatically loads and deduplicates all parquet files in 'resources/' folder 
+    Automatically loads and deduplicates all parquet files in 'resources/' folder
     starting with "drugs_"
 
 Output:
@@ -67,7 +67,6 @@ logging.basicConfig(
 MAX_MODEL_LENGTH = 4096
 MODEL_NAME_GLOBAL = None
 
-
 @dataclass
 class AssessmentConfig:
     name: str
@@ -93,7 +92,6 @@ class AssessmentConfig:
 
         return base_prompt
 
-
 ASSESSMENT_CONFIGS = {
     "diabetes": AssessmentConfig(
         name="Type II diabetes",
@@ -108,7 +106,7 @@ ASSESSMENT_CONFIGS = {
         system_prompt=(
             "You are a medical language model designed to estimate the probability that a woman has breast cancer based solely on medication data. "
             "Provide the probability enclosed within [ESTIMATION] and [/ESTIMATION] tags."
-        ),
+        )
     ),
     "hypertension": AssessmentConfig(
         name="hypertension",
@@ -116,14 +114,11 @@ ASSESSMENT_CONFIGS = {
         system_prompt=(
             "You are a medical language model designed to estimate the probability that a patient has hypertension based solely on medication data. "
             "Provide the probability enclosed within [ESTIMATION] and [/ESTIMATION] tags."
-        ),
-    ),
+        )
+    )
 }
 
-
-def create_conversation(
-    drug: str, assessment_config: AssessmentConfig, cot: bool
-) -> List[Dict]:
+def create_conversation(drug: str, assessment_config: AssessmentConfig, cot: bool) -> List[Dict]:
     """
     Create a conversation template.
     For models that do not support a separate system role (e.g., DeepSeek-R1 and Gemma-2),
@@ -133,7 +128,7 @@ def create_conversation(
     # add extra directive for chain-of-thought if using deepseek-r1 model
     # refer to https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-8B
     if "deepseek-r1" in MODEL_NAME_GLOBAL:
-        system_prompt += '\nPlease ensure that your answer begins with "<think>\n".'
+        system_prompt += "\nPlease ensure that your answer begins with \"<think>\n\"."
     user_prompt = assessment_config.create_prompt(drug, cot)
     # combine system and user prompts for models that don't support system role
     if ("deepseek-r1" in MODEL_NAME_GLOBAL) or ("gemma" in MODEL_NAME_GLOBAL):
@@ -145,14 +140,11 @@ def create_conversation(
             {"role": "user", "content": user_prompt},
         ]
 
-
 def extract_probability(response_text: str) -> Optional[float]:
     """Extract probability from LLM response that uses [ESTIMATION] tags."""
     if not response_text:
         return None
-    tag_match = re.search(
-        r"\[ESTIMATION\](.*?)\[/ESTIMATION\]", response_text, re.DOTALL
-    )
+    tag_match = re.search(r'\[ESTIMATION\](.*?)\[/ESTIMATION\]', response_text, re.DOTALL)
     if not tag_match:
         return None
     estimation_text = tag_match.group(1).strip()
@@ -165,7 +157,7 @@ def extract_probability(response_text: str) -> Optional[float]:
         return None
     except ValueError:
         # try to extract percentage format like "25%"
-        percentage_match = re.search(r"(\d+(?:\.\d+)?)%", estimation_text)
+        percentage_match = re.search(r'(\d+(?:\.\d+)?)%', estimation_text)
         if percentage_match:
             try:
                 value = float(percentage_match.group(1)) / 100
@@ -175,9 +167,10 @@ def extract_probability(response_text: str) -> Optional[float]:
                 pass
     return None
 
-
 def generate_batch_conversations(
-    drugs: List[str], assessment_config: AssessmentConfig, cot: bool
+    drugs: List[str],
+    assessment_config: AssessmentConfig,
+    cot: bool
 ) -> List[List[Dict]]:
     """Generate batch conversations for vLLM processing."""
     conversations = []
@@ -186,9 +179,10 @@ def generate_batch_conversations(
         conversations.append(conversation)
     return conversations
 
-
 def process_batch_results(
-    outputs: List, drugs: List[str], current_seed: int
+    outputs: List,
+    drugs: List[str],
+    current_seed: int
 ) -> tuple[List[Dict], Set[str]]:
     """
     Process batch results from vLLM.
@@ -216,32 +210,23 @@ def process_batch_results(
                     results.append(result)
                 else:
                     # failed to extract probability
-                    logging.warning(
-                        f"Failed to extract probability for {drug} (seed: {current_seed})"
-                    )
+                    logging.warning(f"Failed to extract probability for {drug} (seed: {current_seed})")
                     failed_drugs.add(drug)
             else:
                 # empty output
                 logging.warning(f"Empty output for {drug} (seed: {current_seed})")
                 failed_drugs.add(drug)
         except Exception as e:
-            logging.error(
-                f"Error processing result for {drug} (seed: {current_seed}): {str(e)}"
-            )
+            logging.error(f"Error processing result for {drug} (seed: {current_seed}): {str(e)}")
             failed_drugs.add(drug)
 
     return results, failed_drugs
 
-
-def save_checkpoint(
-    results_df: pd.DataFrame, new_results: List[Dict], checkpoint_file: str
-) -> pd.DataFrame:
+def save_checkpoint(results_df: pd.DataFrame, new_results: List[Dict], checkpoint_file: str) -> pd.DataFrame:
     """Save checkpoint and return updated dataframe."""
     try:
         if new_results:
-            updated_df = pd.concat(
-                [results_df, pd.DataFrame(new_results)], ignore_index=True
-            )
+            updated_df = pd.concat([results_df, pd.DataFrame(new_results)], ignore_index=True)
         else:
             updated_df = results_df
         updated_df.to_parquet(checkpoint_file)
@@ -250,26 +235,18 @@ def save_checkpoint(
         logging.error(f"Error saving checkpoint: {str(e)}")
         return results_df
 
-
 def load_drug_data() -> List[str]:
-    """Load and deduplicate drug data from all parquet files starting with 'drugs_' in
-    resources folder."""
+    """Load and deduplicate drug data from all parquet files starting with 'drugs_' in resources folder."""
     resources_dir = "resources"
 
     if not os.path.exists(resources_dir):
         raise FileNotFoundError(f"Resources directory '{resources_dir}' not found")
 
     # find all parquet files starting with "drugs_"
-    drug_files = [
-        f
-        for f in os.listdir(resources_dir)
-        if f.startswith("drugs_") and f.endswith(".parquet")
-    ]
+    drug_files = [f for f in os.listdir(resources_dir) if f.startswith("drugs_") and f.endswith(".parquet")]
 
     if not drug_files:
-        raise FileNotFoundError(
-            f"No parquet files starting with 'drugs_' found in '{resources_dir}'"
-        )
+        raise FileNotFoundError(f"No parquet files starting with 'drugs_' found in '{resources_dir}'")
 
     logging.info(f"Found {len(drug_files)} drug files: {drug_files}")
 
@@ -291,9 +268,7 @@ def load_drug_data() -> List[str]:
 
             file_drugs = set(df[drug_column].dropna().astype(str).tolist())
             all_drugs.update(file_drugs)
-            logging.info(
-                f"Loaded {len(file_drugs)} drugs from {file} (column: {drug_column})"
-            )
+            logging.info(f"Loaded {len(file_drugs)} drugs from {file} (column: {drug_column})")
 
         except Exception as e:
             logging.error(f"Error loading {file}: {str(e)}")
@@ -307,23 +282,21 @@ def load_drug_data() -> List[str]:
 
     return drugs_list
 
-
 def get_processed_drugs(results_df: pd.DataFrame) -> Set[str]:
     """Get set of already processed drugs."""
     if results_df.empty:
         return set()
     return set(results_df["drug"].unique())
 
-
 def estimate_probabilities_multi_seed(
-    drugs: List[str],
-    assessment_name: str,
-    cot: bool,
-    model_name: str,
-    llm: LLM,
-    sampling_params: SamplingParams,
-    base_seed: int,
-    max_retries: int = 20,
+        drugs: List[str],
+        assessment_name: str,
+        cot: bool,
+        model_name: str,
+        llm: LLM,
+        sampling_params: SamplingParams,
+        base_seed: int,
+        max_retries: int = 20,
 ) -> pd.DataFrame:
     """
     Main estimation function using multi-seed retry approach.
@@ -337,8 +310,11 @@ def estimate_probabilities_multi_seed(
         raise ValueError(f"Invalid assessment name: {assessment_name}")
 
     os.makedirs("results", exist_ok=True)
-    model_shortname = model_name.split("/")[-1].lower()
-    status_suffix = "_".join(filter(None, ["cot" if cot else "", f"seed{base_seed}"]))
+    model_shortname = model_name.split('/')[-1].lower()
+    status_suffix = '_'.join(filter(None, [
+        'cot' if cot else '',
+        f'seed{base_seed}'
+    ]))
     checkpoint_file = f"results/{assessment_name}_{model_shortname}{f'_{status_suffix}' if status_suffix else ''}.parquet"
 
     # load checkpoint with error handling
@@ -351,135 +327,89 @@ def estimate_probabilities_multi_seed(
             logging.error(f"Error loading checkpoint: {str(e)}")
             results_df = pd.DataFrame()
 
-    # get already processed drugs
     processed_drugs = get_processed_drugs(results_df)
-
-    # get remaining drugs to process
     remaining_drugs = [drug for drug in drugs if drug not in processed_drugs]
 
     if not remaining_drugs:
         logging.info("All drugs already processed.")
         return results_df
 
-    logging.info(
-        f"Processing {len(remaining_drugs)} remaining drugs with multi-seed approach..."
-    )
+    logging.info(f"Processing {len(remaining_drugs)} remaining drugs with multi-seed approach...")
 
-    # let vLLM decide batch size automatically, but cap at reasonable limit
     batch_size = min(len(remaining_drugs), 1000)
-
-    # track drugs that need retry across all rounds
     failed_drugs = set(remaining_drugs)
-    checkpoint_interval = 50  # hardcoded checkpoint interval
 
-    # multi-seed retry loop
     for retry_round in range(max_retries):
         if not failed_drugs:
             break
 
-        current_seed = base_seed + retry_round * 1000  # offset seeds significantly
+        current_seed = base_seed + retry_round * 1000
         current_failed_list = list(failed_drugs)
 
-        logging.info(
-            f"Retry round {retry_round + 1}/{max_retries}: Processing {len(current_failed_list)} drugs with seed {current_seed}"
-        )
+        logging.info(f"Retry round {retry_round + 1}/{max_retries}: Processing {len(current_failed_list)} drugs with seed {current_seed}")
 
         round_results = []
         round_failed = set()
 
-        # process current failed drugs in batches
-        for i in tqdm(
-            range(0, len(current_failed_list), batch_size),
-            desc=f"Round {retry_round + 1} batches",
-        ):
-            batch_drugs = current_failed_list[i : i + batch_size]
+        for i in tqdm(range(0, len(current_failed_list), batch_size), desc=f"Round {retry_round + 1} batches"):
+            batch_drugs = current_failed_list[i:i + batch_size]
 
             try:
-                # generate conversations for the batch
-                conversations = generate_batch_conversations(
-                    batch_drugs, assessment_config, cot
-                )
+                conversations = generate_batch_conversations(batch_drugs, assessment_config, cot)
 
-                # create sampling params with current seed
                 current_sampling_params = SamplingParams(
                     temperature=sampling_params.temperature,
                     top_p=sampling_params.top_p,
                     max_tokens=sampling_params.max_tokens,
-                    seed=current_seed,
+                    seed=current_seed
                 )
 
-                # process batch with vLLM
-                outputs = llm.chat(
-                    messages=conversations, sampling_params=current_sampling_params
-                )
+                outputs = llm.chat(messages=conversations, sampling_params=current_sampling_params)
 
-                # process results and identify failures
-                batch_results, batch_failed = process_batch_results(
-                    outputs, batch_drugs, current_seed
-                )
+                batch_results, batch_failed = process_batch_results(outputs, batch_drugs, current_seed)
                 round_results.extend(batch_results)
                 round_failed.update(batch_failed)
 
-                logging.info(
-                    f"Round {retry_round + 1}, Batch {i//batch_size + 1}: {len(batch_results)} successful, {len(batch_failed)} failed"
-                )
+                logging.info(f"Round {retry_round + 1}, Batch {i//batch_size + 1}: {len(batch_results)} successful, {len(batch_failed)} failed")
+
+                # checkpoint every 2 batches
+                batch_idx = i // batch_size
+                if (batch_idx + 1) % 2 == 0 and round_results:
+                    results_df = save_checkpoint(results_df, round_results, checkpoint_file)
+                    logging.info(f"Checkpoint saved after batch {batch_idx + 1} with {len(results_df)} total records")
+                    round_results = []
 
             except Exception as e:
-                logging.error(
-                    f"Error processing batch {i//batch_size + 1} in round {retry_round + 1}: {str(e)}"
-                )
-                # if entire batch fails, mark all drugs for next retry
+                logging.error(f"Error processing batch {i//batch_size + 1} in round {retry_round + 1}: {str(e)}")
                 round_failed.update(batch_drugs)
                 continue
 
-        # update tracking
         failed_drugs = round_failed
 
-        # save checkpoint after each round
+        # final checkpoint for leftovers in this round
         if round_results:
             results_df = save_checkpoint(results_df, round_results, checkpoint_file)
-            logging.info(
-                f"Round {retry_round + 1} complete: {len(round_results)} new successes, {len(failed_drugs)} still failed. Total records: {len(results_df)}"
-            )
+            logging.info(f"Round {retry_round + 1} complete: {len(round_results)} new successes, {len(failed_drugs)} still failed. Total records: {len(results_df)}")
 
-        # if we got some successes this round, continue to next round
-        if round_results:
-            continue
-        else:
-            # if no successes in this round, maybe increase the seed offset more dramatically
-            logging.warning(
-                f"No successes in round {retry_round + 1}, trying with larger seed offset"
-            )
+        if not round_results:
+            logging.warning(f"No successes in round {retry_round + 1}, trying with larger seed offset")
 
-    # handle permanently failed drugs
     if failed_drugs:
-        logging.warning(
-            f"After {max_retries} rounds, {len(failed_drugs)} drugs permanently failed:"
-        )
+        logging.warning(f"After {max_retries} rounds, {len(failed_drugs)} drugs permanently failed:")
         for drug in sorted(failed_drugs):
             logging.warning(f"  - {drug}")
 
-        # create records for permanently failed drugs
-        permanent_failures = []
-        for drug in failed_drugs:
-            result = {
-                "drug": drug,
-                "probability": None,
-                "llm_response": f"FAILED_AFTER_{max_retries}_RETRY_ROUNDS",
-                "seed": base_seed,
-            }
-            permanent_failures.append(result)
+        permanent_failures = [{
+            "drug": drug,
+            "probability": None,
+            "llm_response": f"FAILED_AFTER_{max_retries}_RETRY_ROUNDS",
+            "seed": base_seed,
+        } for drug in failed_drugs]
 
-        if permanent_failures:
-            results_df = save_checkpoint(
-                results_df, permanent_failures, checkpoint_file
-            )
+        results_df = save_checkpoint(results_df, permanent_failures, checkpoint_file)
 
-    # final save
     final_df = save_checkpoint(results_df, [], checkpoint_file)
-    logging.info(
-        f"Multi-seed processing complete. Final results: {len(final_df)} total records"
-    )
+    logging.info(f"Multi-seed processing complete. Final results: {len(final_df)} total records")
 
     return final_df
 
@@ -489,48 +419,25 @@ def main():
     parser = argparse.ArgumentParser(
         description="Estimate medical condition probabilities based on drugs."
     )
-    parser.add_argument(
-        "--model_name", type=str, required=True, help="Huggingface model name to use"
-    )
-    parser.add_argument(
-        "--assessment",
-        type=str,
-        required=True,
-        choices=list(ASSESSMENT_CONFIGS.keys()),
-        help="Type of assessment to perform",
-    )
-    parser.add_argument(
-        "--cot", action="store_true", help="Enable chain-of-thought reasoning"
-    )
-    parser.add_argument(
-        "--num_gpus",
-        type=int,
-        default=2,
-        help="Number of GPUs to use for tensor parallelism",
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=0.6,
-        help="Temperature parameter for sampling",
-    )
-    parser.add_argument(
-        "--seed", type=int, default=42, help="Base random seed for reproducibility"
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug mode (process only first 200 drugs and print responses)",
-    )
-    parser.add_argument(
-        "--int4", action="store_true", help="Enable BitsAndBytes 4-bit quantization"
-    )
-    parser.add_argument(
-        "--max_retries",
-        type=int,
-        default=20,
-        help="Maximum number of retry rounds with different seeds",
-    )
+    parser.add_argument("--model_name", type=str, required=True,
+                        help="Huggingface model name to use")
+    parser.add_argument("--assessment", type=str, required=True,
+                        choices=list(ASSESSMENT_CONFIGS.keys()),
+                        help="Type of assessment to perform")
+    parser.add_argument("--cot", action="store_true",
+                        help="Enable chain-of-thought reasoning")
+    parser.add_argument("--num_gpus", type=int, default=4,
+                        help="Number of GPUs to use for tensor parallelism")
+    parser.add_argument("--temperature", type=float, default=0.6,
+                        help="Temperature parameter for sampling")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Base random seed for reproducibility")
+    parser.add_argument("--debug", action="store_true",
+                        help="Enable debug mode (process only first 200 drugs and print responses)")
+    parser.add_argument("--int4", action="store_true",
+                        help="Enable BitsAndBytes 4-bit quantization")
+    parser.add_argument("--max_retries", type=int, default=20,
+                        help="Maximum number of retry rounds with different seeds")
 
     args = parser.parse_args()
 
@@ -558,9 +465,10 @@ def main():
         llm_kwargs["tensor_parallel_size"] = args.num_gpus
 
     if args.int4:
-        llm_kwargs.update(
-            {"quantization": "bitsandbytes", "load_format": "bitsandbytes"}
-        )
+        llm_kwargs.update({
+            "quantization": "bitsandbytes",
+            "load_format": "bitsandbytes"
+        })
 
     try:
         llm = LLM(**llm_kwargs)
@@ -572,7 +480,7 @@ def main():
         temperature=args.temperature,
         top_p=0.9,
         max_tokens=MAX_MODEL_LENGTH,
-        seed=args.seed,
+        seed=args.seed
     )
 
     # load drug data from all parquet files in resources folder
@@ -616,7 +524,6 @@ def main():
             logging.info(f"Response: {row['llm_response'][:200]}...")
             logging.info(f"Probability: {row['probability']}")
             logging.info(f"{'-'*40}")
-
 
 if __name__ == "__main__":
     main()
