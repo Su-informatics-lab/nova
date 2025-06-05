@@ -99,14 +99,15 @@ ASSESSMENT_CONFIGS = {
         name="Type II diabetes",
         question="",
         system_prompt=(
-            "You are a medical language model designed to estimate the probability that a patient has Type II diabetes based on the specific medicine they use. Provide the probability enclosed within [ESTIMATION] and [/ESTIMATION] tags."
+            "You are a medical language model designed to estimate the probability that a patient has Type II diabetes based on the specific medicine they use. "
+            "Provide the probability enclosed within [ESTIMATION] and [/ESTIMATION] tags."
         ),
     ),
     "breast_cancer": AssessmentConfig(
         name="breast cancer",
         question="",
         system_prompt=(
-            "You are a medical language model designed to estimate the probability that a woman has breast cancer based solely on medication data. "
+            "You are a medical language model designed to estimate the probability that a woman has breast cancer based on the specific medicine they use. "
             "Provide the probability enclosed within [ESTIMATION] and [/ESTIMATION] tags."
         ),
     ),
@@ -114,7 +115,7 @@ ASSESSMENT_CONFIGS = {
         name="hypertension",
         question="",
         system_prompt=(
-            "You are a medical language model designed to estimate the probability that a patient has hypertension based solely on medication data. "
+            "You are a medical language model designed to estimate the probability that a patient has hypertension based on the specific medicine they use. "
             "Provide the probability enclosed within [ESTIMATION] and [/ESTIMATION] tags."
         ),
     ),
