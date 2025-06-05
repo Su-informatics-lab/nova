@@ -252,7 +252,8 @@ def save_checkpoint(
 
 
 def load_drug_data() -> List[str]:
-    """Load and deduplicate drug data from all parquet files starting with 'drugs_' in resources folder."""
+    """Load and deduplicate drug data from all parquet files starting with 'drugs_' in
+    resources folder."""
     resources_dir = "resources"
 
     if not os.path.exists(resources_dir):
@@ -519,7 +520,7 @@ def main():
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Enable debug mode (process only first 5 drugs and print responses)",
+        help="Enable debug mode (process only first 200 drugs and print responses)",
     )
     parser.add_argument(
         "--int4", action="store_true", help="Enable BitsAndBytes 4-bit quantization"
@@ -609,7 +610,7 @@ def main():
 
     # debug mode output
     if args.debug:
-        debug_subset = results_df.head(10)
+        debug_subset = results_df.head(200)
         for idx, row in debug_subset.iterrows():
             logging.info(f"Drug: {row['drug']}")
             logging.info(f"Response: {row['llm_response'][:200]}...")
