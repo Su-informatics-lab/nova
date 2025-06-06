@@ -20,13 +20,13 @@ It is designed to be efficient and robust with multi-seed retries strategy, batc
 ## Quick Start
 
 ```bash
-# Basic usage
+# basic usage
 python drug_disease_prob.py --model_name meta-llama/Llama-3.1-8B-Instruct --assessment diabetes
 
-# With multiple GPUs and quantization
-python drug_disease_prob.py --model_name meta-llama/Llama-3.1-70B-Instruct --assessment hypertension --num_gpus 4 --int4
+# with reasoning
+python drug_disease_prob.py --model_name meta-llama/Llama-3.1-8B-Instruct --assessment breast_cancer --cot
 
-# Debug mode (5 drugs only)
+# debug mode (first 200 drugs only)
 python drug_disease_prob.py --model_name meta-llama/Llama-3.1-8B-Instruct --assessment diabetes --debug
 ```
 
